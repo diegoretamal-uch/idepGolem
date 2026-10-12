@@ -557,6 +557,8 @@ limma_value <- function(data_file_format,
 #'   comparisons, a vectors holding comparison_names,
 #'   exp_type, a character holding experimental design or error messages.
 #'   top_genes, a list, each elements hold the lfc & FDR for a comparison
+#'   full_results, a list, each element holds log2FoldChange, lfcSE, stat,
+#'     pvalue and padj from DESeq2::results() for a comparison
 deg_deseq2 <- function(raw_counts,
                        max_p_limma = .05,
                        min_fc_limma = 2,
@@ -602,7 +604,8 @@ deg_deseq2 <- function(raw_counts,
         "Failed to parse sample names to define groups. Cannot perform DEGs
          and pathway analysis. Please double-check column names! Use
          WT_Rep1, WT_Rep2 etc. ",
-      top_genes = NULL
+      top_genes = NULL,
+      full_results = NULL
     ))
   }
 
@@ -623,7 +626,8 @@ deg_deseq2 <- function(raw_counts,
       exp_type =
         "Too many samples for DESeq2. Please choose limma-voom or
          limma-trend.",
-      top_genes = NULL
+      top_genes = NULL,
+      full_results = NULL
     ))
   }
 
@@ -634,7 +638,8 @@ deg_deseq2 <- function(raw_counts,
       comparisons = NULL,
       exp_type =
         "Please select comparisons.",
-      top_genes = NULL
+      top_genes = NULL,
+      full_results = NULL
     ))
   }
 
@@ -927,6 +932,7 @@ deg_deseq2 <- function(raw_counts,
   result_first <- NULL
   all_calls <- NULL
   top_genes <- list()
+  full_results <- list()
   # Counter
   pk <- 1
   # First results
@@ -1104,16 +1110,21 @@ deg_deseq2 <- function(raw_counts,
       result_first <- selected
       pp <- 1
       top_genes[[1]] <- selected[, c(2, 6)] # fold and FDR in columns 2 & 6
+      # log2FoldChange, lfcSE, stat, pvalue, padj in columns 2 to 6
+      full_results[[1]] <- selected[, 2:6]
       baseMean <- selected[, 1, drop = FALSE]
       names(top_genes)[1] <- comparison_names[kk]
+      names(full_results)[1] <- comparison_names[kk]
     } else {
       result_first <- merge(result_first, selected, by = "row.names")
       rownames(result_first) <- result_first[, 1]
       result_first <- result_first[, -1]
       pk <- pk + 1
       top_genes[[pk]] <- selected[, c(2, 6)]
+      full_results[[pk]] <- selected[, 2:6]
       # Assign name to comparison
       names(top_genes)[pk] <- comparison_names[kk]
+      names(full_results)[pk] <- comparison_names[kk]
     }
   }
 
@@ -1137,6 +1148,7 @@ deg_deseq2 <- function(raw_counts,
       exp_type = exp_type,
       expr = expr,
       top_genes = top_genes,
+      full_results = full_results,
       description = paste0(
         descr,
         " Genes are classified as differly expressed based on having a p-value below ",
@@ -3042,27 +3054,35 @@ plot_deg_scatter <- function(select_contrast,
 #' @param gene_names Gene IDs
 #' @param processed_data  Processed data
 #' @param no_id_conversion If true, gene ids will not be mapped to Ensembl
+#' @param full If true, export every DESeq2 column (log2FC, lfcSE, stat,
+#'  pvalue, adjPval) from limma_value$full_results instead of only log2FC
+#'  and adjPval from limma_value$top_genes
 #'
 #' @export
 #' @return A list. deg_data and limma$results
 deg_information <- function(limma_value,
                             gene_names,
                             processed_data,
-                            no_id_conversion = FALSE) {
+                            no_id_conversion = FALSE,
+                            full = FALSE) {
+  if (full) {
+    tables <- limma_value$full_results
+    suffixes <- c("log2FC", "lfcSE", "stat", "pvalue", "adjPval")
+  } else {
+    tables <- limma_value$top_genes
+    suffixes <- c("log2FC", "adjPval")
+  }
+
   # get the first comparison level
   if(is.null(limma_value$baseMean)){
-    degs_data <- limma_value$top_genes[[1]]
-    colnames(degs_data) <- c(
-      (paste(limma_value$comparisons[[1]], "log2FC", sep = "_")),
-      (paste(limma_value$comparisons[[1]], "adjPval", sep = "_"))
-    )
+    degs_data <- tables[[1]]
+    colnames(degs_data) <- paste(limma_value$comparisons[[1]], suffixes, sep = "_")
   } else {
     degs_data <- data.frame(limma_value$baseMean,
-                            limma_value$top_genes[[1]])
+                            tables[[1]])
     colnames(degs_data) <- c(
       paste("baseMean"),
-      (paste(limma_value$comparisons[[1]], "log2FC", sep = "_")),
-      (paste(limma_value$comparisons[[1]], "adjPval", sep = "_"))
+      paste(limma_value$comparisons[[1]], suffixes, sep = "_")
     )
   }
   
@@ -3070,13 +3090,10 @@ deg_information <- function(limma_value,
     degs_data$User_ID <- rownames(degs_data)
 
     # get the additional comparison levels if they exists
-    if (length(names(limma_value$top_genes)) > 1) {
-      for (i in 2:length(names(limma_value$top_genes))) {
-        temp <- limma_value$top_genes[[i]]
-        colnames(temp) <- c(
-          (paste(limma_value$comparisons[[i]], "log2FC", sep = "_")),
-          (paste(limma_value$comparisons[[i]], "adjPval", sep = "_"))
-        )
+    if (length(names(tables)) > 1) {
+      for (i in 2:length(names(tables))) {
+        temp <- tables[[i]]
+        colnames(temp) <- paste(limma_value$comparisons[[i]], suffixes, sep = "_")
         temp$User_ID <- rownames(temp)
         degs_data <- dplyr::inner_join(degs_data, temp, by = "User_ID")
       }
@@ -3092,13 +3109,10 @@ deg_information <- function(limma_value,
     degs_data$ensembl_ID <- rownames(degs_data)
 
     # get the additional comparison levels if they exists
-    if (length(names(limma_value$top_genes)) > 1) {
-      for (i in 2:length(names(limma_value$top_genes))) {
-        temp <- limma_value$top_genes[[i]]
-        colnames(temp) <- c(
-          (paste(limma_value$comparisons[[i]], "log2FC", sep = "_")),
-          (paste(limma_value$comparisons[[i]], "adjPval", sep = "_"))
-        )
+    if (length(names(tables)) > 1) {
+      for (i in 2:length(names(tables))) {
+        temp <- tables[[i]]
+        colnames(temp) <- paste(limma_value$comparisons[[i]], suffixes, sep = "_")
         temp$ensembl_ID <- rownames(temp)
         degs_data <- dplyr::inner_join(degs_data, temp, by = "ensembl_ID")
       }

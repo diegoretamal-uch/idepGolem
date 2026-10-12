@@ -150,7 +150,9 @@ mod_05_deg_1_ui <- function(id) {
           column(
             width = 5,
             uiOutput(ns("download_lfc_button")),
-            uiOutput(ns("note_download_lfc_button"))
+            uiOutput(ns("note_download_lfc_button")),
+            uiOutput(ns("download_full_deseq2_button")),
+            uiOutput(ns("note_download_full_deseq2_button"))
           ),
           column(
             width = 7,
@@ -1015,6 +1017,49 @@ mod_05_deg_server <- function(id, pre_process, idep_data, load_data, tab) {
       tippy::tippy_this(
         elementId = ns("download_lfc"),
         tooltip = "Download log fold-change, adjusted p-values, and the processed data.",
+        theme = "light"
+      )
+    })
+
+    # Every DESeq2::results() column, not just log2FC and adjPval. Only
+    # DESeq2 fills full_results, so this is NULL for limma runs.
+    deg_info_full <- reactive({
+      req(!is.null(deg$limma$full_results))
+
+      deg_information(
+        limma_value = deg$limma,
+        gene_names = pre_process$all_gene_names(),
+        processed_data = pre_process$data(),
+        no_id_conversion = load_data$no_id_conversion(),
+        full = TRUE
+      )[[1]]
+    })
+
+    output$download_full_deseq2 <- downloadHandler(
+      filename = function() {
+        "Results_full_DESeq2.csv"
+      },
+      content = function(file) {
+        write.csv(deg_info_full(), file, row.names = FALSE)
+      }
+    )
+
+    output$download_full_deseq2_button <- renderUI({
+      req(!is.null(deg$limma$full_results))
+      downloadButton(
+        outputId = ns("download_full_deseq2"),
+        "Full DESeq2 results"
+      )
+    })
+
+    output$note_download_full_deseq2_button <- renderUI({
+      req(!is.null(deg$limma$full_results))
+      tippy::tippy_this(
+        elementId = ns("download_full_deseq2"),
+        tooltip = paste(
+          "Adds lfcSE, Wald stat and raw p-value per comparison (for stat-ranked GSEA).",
+          "With the threshold-based Wald test enabled, stat is the thresholded statistic."
+        ),
         theme = "light"
       )
     })
