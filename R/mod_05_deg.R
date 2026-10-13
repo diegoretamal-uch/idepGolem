@@ -1022,7 +1022,13 @@ mod_05_deg_server <- function(id, pre_process, idep_data, load_data, tab) {
     })
 
     # Every DESeq2::results() column, not just log2FC and adjPval. Only
-    # DESeq2 fills full_results, so this is NULL for limma runs.
+    # DESeq2 fills full_results, so this is NULL for limma runs. The button
+    # also follows the method selector, so it hides as soon as another
+    # method is picked, before the analysis is resubmitted.
+    show_full_deseq2 <- reactive({
+      !is.null(deg$limma$full_results) && isTRUE(input$counts_deg_method == 3)
+    })
+
     deg_info_full <- reactive({
       req(!is.null(deg$limma$full_results))
 
@@ -1045,7 +1051,7 @@ mod_05_deg_server <- function(id, pre_process, idep_data, load_data, tab) {
     )
 
     output$download_full_deseq2_button <- renderUI({
-      req(!is.null(deg$limma$full_results))
+      req(show_full_deseq2())
       downloadButton(
         outputId = ns("download_full_deseq2"),
         "Full DESeq2 results"
@@ -1053,7 +1059,7 @@ mod_05_deg_server <- function(id, pre_process, idep_data, load_data, tab) {
     })
 
     output$note_download_full_deseq2_button <- renderUI({
-      req(!is.null(deg$limma$full_results))
+      req(show_full_deseq2())
       tippy::tippy_this(
         elementId = ns("download_full_deseq2"),
         tooltip = paste(
