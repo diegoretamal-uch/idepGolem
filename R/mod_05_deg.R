@@ -196,7 +196,26 @@ mod_05_deg_1_ui <- function(id) {
               "#deg-experiment_design{color: red;font-size: 16px;}"
             )),
             br(),
-            htmlOutput(outputId = ns("list_model_comparisons"))
+            conditionalPanel(
+              condition = "input.counts_deg_method == 3 && output.data_file_format == 1",
+              radioButtons(
+                inputId = ns("fit_mode"),
+                label = strong("Samples used to fit the DESeq2 model:"),
+                choices = c(
+                  "All samples (one model, shared dispersion)" = "global",
+                  "Only the samples in each comparison (one model per comparison)" = "pairwise"
+                ),
+                selected = "global"
+              ),
+              tippy::tippy_this(
+                ns("fit_mode"),
+                "All samples: one DESeq2 model; the selected comparisons are contrasts of that model, so every group (also those not compared) contributes to size factors and dispersion estimates. Only the samples in each comparison: a separate model per comparison with just the two groups compared. Prefer it when one group is much more variable than the others.",
+                theme = "light"
+              ),
+              ns = ns
+            ),
+            htmlOutput(outputId = ns("list_model_comparisons")),
+            htmlOutput(outputId = ns("fit_mode_summary"))
           ),
           tabPanel(
             title = "Results",
@@ -603,6 +622,23 @@ mod_05_deg_server <- function(id, pre_process, idep_data, load_data, tab) {
       )
     })
 
+    # Which samples go into the DESeq2 model of each comparison, and after a
+    # run, how many genes were tested.
+    output$fit_mode_summary <- renderUI({
+      req(isTRUE(input$counts_deg_method == 3))
+      req(pre_process$data_file_format() == 1)
+      req(!is.null(pre_process$raw_counts()))
+      fit_mode_summary_ui(
+        sample_names = colnames(pre_process$raw_counts()),
+        sample_info = pre_process$sample_info(),
+        select_factors_model = input$select_factors_model,
+        select_interactions = input$select_interactions,
+        selected_comparisons = input$select_model_comprions,
+        fit_mode = input$fit_mode,
+        last_run = deg$limma
+      )
+    })
+
     output$list_interaction_terms <- renderUI({
       interactions <- list_interaction_terms_ui(
         sample_info = pre_process$sample_info(),
@@ -715,6 +751,7 @@ mod_05_deg_server <- function(id, pre_process, idep_data, load_data, tab) {
         input$limma_fc,
         input$threshold_wald_test,
         input$independent_filtering,
+        input$fit_mode,
         input$select_factors_model,
         input$select_block_factors_model,
         input$select_model_comprions,
@@ -875,6 +912,11 @@ mod_05_deg_server <- function(id, pre_process, idep_data, load_data, tab) {
           if (input$counts_deg_method == 3) {
             independent_filtering <- input$independent_filtering
           }
+
+          fit_mode <- "global"
+          if (input$counts_deg_method == 3 && !is.null(input$fit_mode)) {
+            fit_mode <- input$fit_mode
+          }
           
           if (is.null(input$select_model_comprions) && 
               !is_summary_format(pre_process$data_file_format())) {
@@ -898,7 +940,8 @@ mod_05_deg_server <- function(id, pre_process, idep_data, load_data, tab) {
               p_vals = pre_process$p_vals(),
               threshold_wald_test = threshold_wald_test,
               independent_filtering = independent_filtering,
-              descr = pre_process$descr()
+              descr = pre_process$descr(),
+              fit_mode = fit_mode
             )
             # Check for returned errors
             if ("character" %in% class(deg$limma)){
@@ -1043,7 +1086,11 @@ mod_05_deg_server <- function(id, pre_process, idep_data, load_data, tab) {
 
     output$download_full_deseq2 <- downloadHandler(
       filename = function() {
-        "Results_full_DESeq2.csv"
+        if (identical(deg$limma$fit_mode, "pairwise")) {
+          "Results_full_DESeq2_pairwise.csv"
+        } else {
+          "Results_full_DESeq2.csv"
+        }
       },
       content = function(file) {
         write.csv(deg_info_full(), file, row.names = FALSE)

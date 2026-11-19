@@ -290,6 +290,99 @@ experiment_design_txt <- function(sample_info,
   }
 }
 
+#' Per-comparison sample summary for the DESeq2 fit mode
+#'
+#' Lists, for each selected comparison, the samples that enter the DESeq2
+#' model: all samples in "global" mode, only the two groups compared in
+#' "pairwise" mode. If the last run used the same comparisons, the number
+#' of genes tested (non-NA adjusted p-value) is added.
+#'
+#' @param sample_names Column names of the raw counts
+#' @param sample_info Experiment design (rows are samples), or NULL
+#' @param select_factors_model Selected main factors
+#' @param select_interactions Selected interaction terms
+#' @param selected_comparisons Selected comparisons, e.g.
+#'  "Treatment: CHV vs. MN" (or "MN-CHV" without a design file)
+#' @param fit_mode "global" or "pairwise"
+#' @param last_run The list returned by limma_value() for the last run
+#'
+#' @return An HTML tag list, or NULL
+fit_mode_summary_ui <- function(sample_names,
+                                sample_info,
+                                select_factors_model,
+                                select_interactions,
+                                selected_comparisons,
+                                fit_mode,
+                                last_run = NULL) {
+  if (is.null(selected_comparisons) || is.null(fit_mode)) {
+    return(NULL)
+  }
+  n_all <- length(sample_names)
+  use_design <- !is.null(select_factors_model) && !is.null(sample_info)
+  pairwise <- identical(fit_mode, "pairwise") && length(select_interactions) == 0
+
+  name_groups <- as.character(detect_groups(
+    sample_names, NULL, preserve_original = TRUE
+  ))
+  rows <- lapply(selected_comparisons, function(comp) {
+    if (use_design) {
+      fac <- gsub(":.*", "", comp)
+      lv <- unlist(strsplit(gsub(".*: ", "", comp), " vs\\. "))
+      grp <- as.character(sample_info[match(sample_names, rownames(sample_info)), fac])
+      name <- gsub(" vs\\. ", "-", gsub(".*: ", "", comp))
+    } else {
+      lv <- unlist(strsplit(comp, "-"))
+      grp <- name_groups
+      name <- comp
+    }
+    keep <- if (pairwise) grp %in% lv else rep(TRUE, n_all)
+    counts <- table(grp[keep])
+    txt <- paste0(
+      name, ": ", sum(keep), " samples (",
+      paste0(names(counts), " x", as.integer(counts), collapse = ", "), ")"
+    )
+    fs <- last_run$fit_summary
+    if (!is.null(fs) && identical(last_run$fit_mode, if (pairwise) "pairwise" else "global") &&
+      name %in% fs$comparison) {
+      txt <- paste0(
+        txt, " | genes tested in last run: ",
+        fs$genes_tested[fs$comparison == name]
+      )
+    }
+    txt
+  })
+
+  header <- if (pairwise) {
+    "One DESeq2 model per comparison, fitted only on its samples:"
+  } else {
+    paste0(
+      "One DESeq2 model fitted on all ", n_all,
+      " samples; each comparison is a contrast of that model:"
+    )
+  }
+  notes <- NULL
+  if (identical(fit_mode, "pairwise") && length(select_interactions) > 0) {
+    notes <- shiny::tags$p(
+      style = "color: #b35900;",
+      "Pairwise fitting is not available with interaction terms; all samples will be used."
+    )
+  } else if (!pairwise) {
+    notes <- shiny::tags$p(
+      style = "color: #666; font-size: 90%;",
+      "Groups not included in a comparison still affect its dispersion estimates."
+    )
+  }
+  if (!is.null(last_run$fit_note) && identical(last_run$fit_mode, "pairwise")) {
+    notes <- shiny::tagList(notes, shiny::tags$p(style = "color: #b35900;", last_run$fit_note))
+  }
+
+  shiny::tagList(
+    shiny::tags$p(shiny::strong(header)),
+    shiny::tags$ul(lapply(rows, shiny::tags$li)),
+    notes
+  )
+}
+
 #' Refernce levels for selected factor
 #'
 #' This function uses a vector of selected factors to create
@@ -373,6 +466,9 @@ select_reference_levels_ui <- function(sample_info,
 #' bigger than a value
 #' @param independent_filtering whether or not to conduct independent
 #' filtering in DESeq2 results function.
+#' @param fit_mode DESeq2 only. "global" (default) fits one model with all
+#'  samples; "pairwise" fits a separate model for each selected comparison
+#'  using only the samples of the two groups being compared.
 #'
 #' @export
 #' @return List with the results of the DEG analysis. When the function
@@ -403,7 +499,8 @@ limma_value <- function(data_file_format,
                         p_vals,
                         threshold_wald_test = FALSE,
                         independent_filtering = TRUE,
-                        descr = "") {
+                        descr = "",
+                        fit_mode = "global") {
   # read counts data -----------------------------------------------------------
   if (data_file_format == 1) {
     # DESeq2----------------------------
@@ -420,7 +517,8 @@ limma_value <- function(data_file_format,
           reference_levels = factor_reference_levels,
           threshold_wald_test = threshold_wald_test,
           independent_filtering = independent_filtering,
-          descr = descr
+          descr = descr,
+          fit_mode = fit_mode
         )
       )
       # limma-voom 2 or limma-trend 1 --------------------
@@ -559,6 +657,9 @@ limma_value <- function(data_file_format,
 #'   top_genes, a list, each elements hold the lfc & FDR for a comparison
 #'   full_results, a list, each element holds log2FoldChange, lfcSE, stat,
 #'     pvalue and padj from DESeq2::results() for a comparison
+#'   fit_summary, a data frame with the samples and genes tested per
+#'     comparison
+#' @param fit_mode "global" (default) or "pairwise". See limma_value().
 deg_deseq2 <- function(raw_counts,
                        max_p_limma = .05,
                        min_fc_limma = 2,
@@ -569,7 +670,33 @@ deg_deseq2 <- function(raw_counts,
                        reference_levels = NULL,
                        threshold_wald_test = FALSE,
                        independent_filtering = TRUE,
-                       descr = "") {
+                       descr = "",
+                       fit_mode = "global") {
+  # Pairwise fit: one DESeq2 model per comparison -----------------
+  fit_note <- NULL
+  if (identical(fit_mode, "pairwise")) {
+    if (any(grepl(":", model_factors))) {
+      fit_note <- paste(
+        "Pairwise fitting is not available with interaction terms;",
+        "one model was fitted with all samples."
+      )
+    } else {
+      return(deg_deseq2_pairwise(
+        raw_counts = raw_counts,
+        max_p_limma = max_p_limma,
+        min_fc_limma = min_fc_limma,
+        selected_comparisons = selected_comparisons,
+        sample_info = sample_info,
+        model_factors = model_factors,
+        block_factor = block_factor,
+        reference_levels = reference_levels,
+        threshold_wald_test = threshold_wald_test,
+        independent_filtering = independent_filtering,
+        descr = descr
+      ))
+    }
+  }
+
   # Local parameters---------------------------------------------
   max_samples <- 500
   max_comparisons <- 500
@@ -1156,8 +1283,258 @@ deg_deseq2 <- function(raw_counts,
         " and log fold change above ",
         min_fc_limma, "."
       ),
-      baseMean = baseMean
+      baseMean = baseMean,
+      fit_mode = "global",
+      fit_note = fit_note,
+      fit_summary = deseq2_fit_summary(
+        full_results,
+        n_samples = ncol(raw_counts),
+        samples = paste(colnames(raw_counts), collapse = ", ")
+      )
     )
+  )
+}
+
+#' Samples and tested genes per DESeq2 comparison
+#'
+#' @param full_results Named list of DESeq2 result tables (padj in the
+#'  last column), one per comparison
+#' @param n_samples Number of samples in the model of each comparison
+#' @param samples Sample names in the model of each comparison
+#'
+#' @return A data frame with one row per comparison
+deseq2_fit_summary <- function(full_results, n_samples, samples) {
+  if (length(full_results) == 0) {
+    return(NULL)
+  }
+  data.frame(
+    comparison = names(full_results),
+    samples_in_model = n_samples,
+    genes_tested = vapply(
+      full_results,
+      function(x) sum(!is.na(x[, ncol(x)])),
+      numeric(1)
+    ),
+    samples = samples,
+    row.names = NULL,
+    stringsAsFactors = FALSE
+  )
+}
+
+#' Pairwise DESeq2: one model per comparison
+#'
+#' Called by deg_deseq2() when fit_mode = "pairwise". For each selected
+#' comparison, keeps only the samples in the two groups being compared and
+#' fits DESeq2 on them, so size factors and dispersions are estimated without
+#' the other groups. Results are combined in the same format as the global
+#' fit. baseMean is still computed on all samples so that column stays the
+#' same as in a global fit.
+#'
+#' @inheritParams deg_deseq2
+#'
+#' @return Same list as deg_deseq2(), or an error message string.
+deg_deseq2_pairwise <- function(raw_counts,
+                                max_p_limma = .05,
+                                min_fc_limma = 2,
+                                selected_comparisons = NULL,
+                                sample_info = NULL,
+                                model_factors = NULL,
+                                block_factor = NULL,
+                                reference_levels = NULL,
+                                threshold_wald_test = FALSE,
+                                independent_filtering = TRUE,
+                                descr = "") {
+  if (is.null(model_factors)) {
+    sample_info <- NULL
+  }
+  if (!is.null(model_factors) && is.null(selected_comparisons)) {
+    return(list(
+      results = NULL, comparisons = NULL,
+      exp_type = "Please select comparisons.",
+      top_genes = NULL, full_results = NULL
+    ))
+  }
+
+  # Without a design file, groups come from the sample names.
+  name_groups <- NULL
+  if (is.null(model_factors)) {
+    name_groups <- as.character(detect_groups(
+      colnames(raw_counts), NULL, preserve_original = TRUE
+    ))
+    if (is.null(selected_comparisons)) {
+      ug <- unique(name_groups)
+      if (length(ug) < 2) {
+        return(list(
+          results = NULL, comparisons = NULL,
+          exp_type = "Fewer than two sample groups detected.",
+          top_genes = NULL, full_results = NULL
+        ))
+      }
+      pairs <- utils::combn(seq_along(ug), 2)
+      selected_comparisons <- paste0(ug[pairs[2, ]], "-", ug[pairs[1, ]])
+    }
+  }
+
+  fits <- list()
+  notes <- character(0)
+  for (comp in selected_comparisons) {
+    sub_info <- NULL
+    sub_factors <- NULL
+    sub_block <- NULL
+    sub_refs <- NULL
+
+    if (is.null(model_factors)) {
+      lv <- unlist(strsplit(comp, "-"))
+      keep <- name_groups %in% lv
+    } else {
+      fac <- gsub(":.*", "", comp)
+      lv <- unlist(strsplit(gsub(".*: ", "", comp), " vs\\. "))
+      keep <- as.character(sample_info[, fac]) %in% lv
+      sub_info <- sample_info[keep, , drop = FALSE]
+
+      # Factors that become constant in the subset cannot stay in the model.
+      n_levels <- function(f) length(unique(as.character(sub_info[, f])))
+      sub_factors <- model_factors[vapply(model_factors, n_levels, numeric(1)) > 1]
+      if (!is.null(block_factor)) {
+        sub_block <- block_factor[vapply(block_factor, n_levels, numeric(1)) > 1]
+        if (length(sub_block) == 0) sub_block <- NULL
+      }
+      dropped <- setdiff(c(model_factors, block_factor), c(sub_factors, sub_block))
+      if (length(dropped) > 0) {
+        notes <- c(notes, paste0(
+          comp, ": dropped ", paste(dropped, collapse = ", "),
+          " (single level in these samples)"
+        ))
+      }
+
+      # Keep only reference levels that exist in the subset.
+      for (refs in reference_levels) {
+        if (is.null(refs)) next
+        f <- gsub(":.*", "", refs)
+        l <- gsub(".*:", "", refs)
+        if (f %in% c(sub_factors, sub_block) && l %in% as.character(sub_info[, f])) {
+          sub_refs <- c(sub_refs, refs)
+        }
+      }
+    }
+
+    if (sum(keep) < 3) {
+      return(paste0(
+        "Error in DESeq2 analysis: comparison ", comp,
+        " has fewer than 3 samples."
+      ))
+    }
+
+    fit <- deg_deseq2(
+      raw_counts = raw_counts[, keep, drop = FALSE],
+      max_p_limma = max_p_limma,
+      min_fc_limma = min_fc_limma,
+      selected_comparisons = comp,
+      sample_info = sub_info,
+      model_factors = sub_factors,
+      block_factor = sub_block,
+      reference_levels = sub_refs,
+      threshold_wald_test = threshold_wald_test,
+      independent_filtering = independent_filtering,
+      descr = descr,
+      fit_mode = "global"
+    )
+    # Error message, or a list without results (e.g. no replicates)
+    if (is.character(fit)) {
+      return(paste0(fit, " (comparison ", comp, ")"))
+    }
+    if (is.null(fit$results)) {
+      return(fit)
+    }
+
+    # Make the R code reproduce the subset
+    subset_line <- paste0(
+      "raw_counts <- raw_counts[, c(\"",
+      paste(colnames(raw_counts)[keep], collapse = "\", \""),
+      "\")] # pairwise fit: only the samples in this comparison\n"
+    )
+    fit$expr <- sub(
+      "str(raw_counts)\n", paste0(subset_line, "str(raw_counts)\n"),
+      fit$expr,
+      fixed = TRUE
+    )
+    fit$keep <- keep
+    fits[[comp]] <- fit
+  }
+
+  genes <- rownames(raw_counts)
+  all_calls <- do.call(cbind, lapply(fits, function(f) {
+    f$results[genes, , drop = FALSE]
+  }))
+  top_genes <- do.call(c, lapply(unname(fits), function(f) {
+    lapply(f$top_genes, function(x) x[genes, , drop = FALSE])
+  }))
+  full_results <- do.call(c, lapply(unname(fits), function(f) {
+    lapply(f$full_results, function(x) x[genes, , drop = FALSE])
+  }))
+  comparison_names <- unlist(lapply(fits, function(f) f$comparisons), use.names = FALSE)
+  colnames(all_calls) <- comparison_names
+
+  # baseMean on all samples: identical to the global fit's column.
+  dds_all <- DESeq2::DESeqDataSetFromMatrix(
+    countData = raw_counts,
+    colData = data.frame(row.names = colnames(raw_counts), x = rep(1, ncol(raw_counts))),
+    design = ~1
+  )
+  dds_all <- DESeq2::estimateSizeFactors(dds_all)
+  baseMean <- data.frame(
+    baseMean = rowMeans(DESeq2::counts(dds_all, normalized = TRUE)),
+    row.names = genes
+  )
+
+  n_samples <- vapply(fits, function(f) sum(f$keep), numeric(1))
+  sample_lists <- vapply(
+    fits,
+    function(f) paste(colnames(raw_counts)[f$keep], collapse = ", "),
+    character(1)
+  )
+  fit_summary <- deseq2_fit_summary(full_results, n_samples, sample_lists)
+
+  model_txt <- if (is.null(model_factors)) {
+    "~ groups"
+  } else {
+    paste("~", paste(c(model_factors, block_factor), collapse = " + "))
+  }
+  exp_type <- paste0(
+    "Model: ", model_txt, ", fitted separately for each comparison (",
+    paste0(comparison_names, ": ", n_samples, " samples", collapse = "; "),
+    ")."
+  )
+  if (length(notes) > 0) {
+    exp_type <- paste(exp_type, paste(notes, collapse = "; "))
+  }
+
+  expr <- paste0(
+    "# Pairwise fit: one DESeq2 model per comparison, each using only the\n",
+    "# samples of the two groups compared.\n\n",
+    paste(vapply(fits, function(f) f$expr, character(1)), collapse = "\n\n")
+  )
+
+  list(
+    results = all_calls,
+    comparisons = comparison_names,
+    exp_type = exp_type,
+    expr = expr,
+    top_genes = top_genes,
+    full_results = full_results,
+    description = paste0(
+      descr,
+      " DESeq2 was fitted separately for each comparison, using only the",
+      " samples of the two groups compared.",
+      " Genes are classified as differly expressed based on having a p-value below ",
+      max_p_limma,
+      " and log fold change above ",
+      min_fc_limma, "."
+    ),
+    baseMean = baseMean,
+    fit_mode = "pairwise",
+    fit_note = if (length(notes) > 0) paste(notes, collapse = "; ") else NULL,
+    fit_summary = fit_summary
   )
 }
 
